@@ -14,7 +14,7 @@ This repo is **self-contained** — the steps below run syncthing **by hand, wit
 
 ## Run it without orca
 
-### Docker / Podman
+### Docker Compose
 
 ```yaml
 # compose.yml
@@ -37,7 +37,26 @@ services:
 docker compose up -d
 ```
 
-Podman: the same file with `podman-compose up -d`.
+### Other runtimes
+
+**Podman** — the compose above works with `podman compose up -d`, or run it directly:
+
+```sh
+podman run -d --name syncthing --restart unless-stopped \
+    -p 8384:8384/tcp \
+    -p 22000:22000/tcp \
+    -p 22000:22000/udp \
+    -p 21027:21027/udp \
+    -v ./config:/config \
+    -v /path/to/data:/data \
+    lscr.io/linuxserver/syncthing:latest
+```
+
+**LXC** — on a container-capable LXC (e.g. a Proxmox LXC with nesting enabled) run the same image via Docker/Podman as above, or install syncthing from upstream directly on the guest: <https://syncthing.net/>.
+
+**VM** — install syncthing from upstream (<https://syncthing.net/>) or run the same container image inside the VM; expose port `8384`.
+
+**Unraid** — add via *Community Applications*, or *Docker → Add Container* with image `lscr.io/linuxserver/syncthing:latest`, port `8384`, and the volume paths above.
 
 ### Ports & data
 
