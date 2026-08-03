@@ -87,4 +87,5 @@ orca service.configure syncthing   # apply config via the upstream API
 
 - `src/` — the plugin (pure Rust): the `ServiceBackend` descriptor + `configure` / `status`.
 - [CAPABILITIES.md](CAPABILITIES.md) — the service-backend contract checklist.
+- `docs/` — standalone operator notes.
 - `assets/` — plugin icon.
