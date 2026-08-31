@@ -4,12 +4,64 @@
 //! (deploy/backup/restore/configure/status/connect/sync) drive syncthing. No
 //! `#[orca_tool]`s — the only orca dep is `plugin-toolkit`. Modeled on the
 //! nfs StorageBackend. See orca/docs/PLUGIN-PROGRAM.md.
+//!
+//! The plugin also registers a [`SyncthingReplication`] over the `replication`
+//! domain: the *observed* health side of an orca `storage.replication`
+//! relationship that the mount-converge failover gate consults. Both backends
+//! are advertised from one `[[bin]]` — see [`backends_json`] / [`dispatch`].
 #![allow(clippy::disallowed_types)]
 
 use plugin_toolkit::service::{
     BoxFuture, Endpoint, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
     WorkloadSpec,
 };
+
+pub mod replication;
+pub use replication::SyncthingReplication;
+
+/// Invoke-prefix the loader routes `service.*` backend ops back through.
+const SERVICE_PREFIX: &str = "service.__backend.syncthing";
+/// Invoke-prefix the loader routes `replication.status` back through.
+const REPLICATION_PREFIX: &str = "replication.__backend.syncthing";
+
+/// The combined `backends()` payload this plugin advertises: its
+/// [`ServiceBackend`] **and** its [`SyncthingReplication`] provider, so one
+/// subprocess lights up both domains. Serialized as a two-element `BackendDef`
+/// array — the loader registers each against its domain dispatch table.
+pub fn backends_json() -> String {
+    use plugin_toolkit::backend_def::{replication_backend_def, service_backend_def};
+    let service = service_backend_def(&SyncthingBackend::new("syncthing"), SERVICE_PREFIX);
+    let replication = replication_backend_def("syncthing", REPLICATION_PREFIX);
+    plugin_toolkit::serde_json::to_string(&[service, replication])
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Route a proxied backend op to the right domain dispatcher. Returns `None` for
+/// a tool that belongs to neither backend (nothing else is served here).
+pub fn dispatch(
+    tool: &str,
+    args: plugin_toolkit::serde_json::Value,
+) -> Option<Result<plugin_toolkit::serde_json::Value, plugin_toolkit::serde_json::Value>> {
+    if let Some(op) = tool
+        .strip_prefix(SERVICE_PREFIX)
+        .and_then(|r| r.strip_prefix('.'))
+    {
+        let backend = SyncthingBackend::new("syncthing");
+        return Some(plugin_toolkit::reactor::block_on(
+            plugin_toolkit::service::dispatch_op(&backend, op, args),
+        ));
+    }
+    if let Some(op) = tool
+        .strip_prefix(REPLICATION_PREFIX)
+        .and_then(|r| r.strip_prefix('.'))
+    {
+        let provider = SyncthingReplication::new("syncthing");
+        return Some(plugin_toolkit::reactor::block_on(
+            plugin_toolkit::storage::replication_status::dispatch_op(&provider, op, args),
+        ));
+    }
+    None
+}
 
 /// syncthing backend. Holds only the provider name; per-instance endpoint/creds
 /// come from the `Endpoint` the generic `service.*` tools hand each op.
