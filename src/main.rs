@@ -3,12 +3,18 @@
 //! One `[[bin]]` advertises TWO domain backends — the `ServiceBackend` (deploy/
 //! backup/configure/status) and the `replication` [`SyncthingReplication`]
 //! provider (the observed sync-health the mount-converge failover gate reads).
-//! The hybrid `serve_tool_plugin!` arm serves both: `backends` is the combined
-//! two-`BackendDef` payload; `backend_dispatch` routes each domain's
-//! `*.__backend.syncthing.*` calls to the right dispatcher (see `lib.rs`).
-plugin_toolkit::serve_tool_plugin! {
-    name: "syncthing",
-    target_compat: "any",
-    backends: syncthing::backends_json(),
-    backend_dispatch: syncthing::dispatch,
+//! Both are registered as typed backends on the [`Plugin`] builder, which emits
+//! all the wire dispatch — the plugin hand-writes no op strings.
+
+plugin_toolkit::instrument::bootstrap!();
+
+use plugin_toolkit::plugin::Plugin;
+use syncthing::{SyncthingBackend, SyncthingReplication};
+
+fn main() -> plugin_toolkit::anyhow::Result<()> {
+    Plugin::named("syncthing")
+        .version(env!("CARGO_PKG_VERSION"))
+        .service(SyncthingBackend::new("syncthing"))
+        .replication(SyncthingReplication::new("syncthing"))
+        .serve()
 }
