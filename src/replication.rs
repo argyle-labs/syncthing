@@ -21,17 +21,11 @@
 //! URL defaults to `http://<member>:8384` and may be overridden by a
 //! `scoped_name("syncthing", <member>, "url")` secret.
 
-use plugin_toolkit::client::{Client, Request};
-use plugin_toolkit::secrets;
+use crate::api;
+use plugin_toolkit::client::Client;
 use plugin_toolkit::storage::replication_status::ReplicationStatusProvider;
 use plugin_toolkit::storage::{ReplicationStatus, StorageError};
 use serde::Deserialize;
-
-/// Default Syncthing GUI/REST port. Overridable per member via a `url` secret.
-const DEFAULT_PORT: u16 = 8384;
-
-/// Provider name — the string a relationship's `provider` field carries.
-const PROVIDER: &str = "syncthing";
 
 /// The `syncthing` [`ReplicationStatusProvider`]. Stateless; every call resolves
 /// per-member credentials from the secret store and queries the REST API fresh
@@ -111,33 +105,16 @@ struct MemberHealth {
 }
 
 impl SyncthingReplication {
-    /// Base REST URL for `member` — the `url` secret if set, else the port
-    /// convention. Trailing slash trimmed so paths concatenate cleanly.
+    /// Base REST URL for `member`. Delegates to [`api::base_url`]; the
+    /// credential/URL convention is shared with the service `status` probe.
     fn base_url(member: &str) -> Result<String, StorageError> {
-        let key = secrets::scoped_name(PROVIDER, member, "url");
-        let url = secrets::get(&key)
-            .map_err(|e| StorageError::Other(format!("read url secret for {member}: {e}")))?
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| Self::default_base_url(member));
-        Ok(url.trim_end_matches('/').to_string())
+        api::base_url(member).map_err(StorageError::Other)
     }
 
-    /// The port-convention base URL for a member with no `url` secret override.
-    /// Pure — no runtime/secret dependency, so the convention is unit-testable.
-    fn default_base_url(member: &str) -> String {
-        format!("http://{member}:{DEFAULT_PORT}")
-    }
-
-    /// Resolve `member`'s API key from the secret store. A missing key is a
-    /// configuration gap, surfaced as an error so the member reads unhealthy
-    /// (the gate holds) rather than silently "connected".
+    /// `member`'s API key. A missing key is a configuration gap, surfaced as an
+    /// error so the member reads unhealthy (the gate holds).
     fn api_key(member: &str) -> Result<String, StorageError> {
-        let key = secrets::scoped_name(PROVIDER, member, "apikey");
-        secrets::get_required(&key).map_err(|e| {
-            StorageError::Other(format!(
-                "no Syncthing API key for member '{member}' (secret '{key}'): {e}"
-            ))
-        })
+        api::api_key(member).map_err(StorageError::Other)
     }
 
     /// GET `{base}{path}` with the API key header, decoding JSON into `T`.
@@ -147,22 +124,7 @@ impl SyncthingReplication {
         key: &str,
         path: &str,
     ) -> Result<T, StorageError> {
-        let url = format!("{base}{path}");
-        let resp = client
-            .send(
-                Request::new("GET", &url)
-                    .header("X-API-Key", key)
-                    .timeout_ms(8_000),
-            )
-            .map_err(|e| StorageError::Transport(format!("GET {url}: {e}")))?;
-        if !resp.is_success() {
-            return Err(StorageError::Transport(format!(
-                "GET {url} → HTTP {}",
-                resp.status
-            )));
-        }
-        resp.json::<T>()
-            .map_err(|e| StorageError::Other(format!("decode {url}: {e}")))
+        api::get_json(client, base, Some(key), path).map_err(StorageError::Transport)
     }
 
     /// Observe one member's health for `folder`, applying the `diagnostics.md`
@@ -315,9 +277,8 @@ mod tests {
     #[test]
     fn base_url_defaults_to_port_convention() {
         // The fallback used when a member has no `url` secret override.
-        assert_eq!(
-            SyncthingReplication::default_base_url("10.0.0.10"),
-            "http://10.0.0.10:8384"
-        );
+        // Convention now lives in `api`; asserted here too so a change to it
+        // is visibly a change to replication's behaviour.
+        assert_eq!(api::default_base_url("10.0.0.10"), "http://10.0.0.10:8384");
     }
 }

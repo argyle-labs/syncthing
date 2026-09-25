@@ -11,11 +11,13 @@
 //! are advertised from one `[[bin]]` — registered as typed facets in `main.rs`.
 #![allow(clippy::disallowed_types)]
 
+use plugin_toolkit::client::Client;
 use plugin_toolkit::service::{
     BoxFuture, Endpoint, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
     WorkloadSpec,
 };
 
+pub mod api;
 pub mod replication;
 pub use replication::SyncthingReplication;
 
@@ -90,13 +92,69 @@ impl ServiceBackend for SyncthingBackend {
         Box::pin(async move { Err(ServiceError::unimplemented("syncthing.configure")) })
     }
 
+    /// Liveness + version for one instance.
+    ///
+    /// Probes `/rest/noauth/health`, which needs **no** API key — so an instance
+    /// whose key is not in the secret store still reports honest liveness rather
+    /// than erroring. When a key *is* configured the version is added as detail;
+    /// its absence degrades detail, never health.
+    ///
+    /// The URL comes from the endpoint's `routes` via [`Endpoint::primary_url`]
+    /// (orca has no scalar `base_url` — reachability is the ordered route set).
+    /// An endpoint with no URL-addressable route is an unknown, not a false
+    /// negative, so it is reported as an error rather than as "unhealthy".
     fn status<'a>(
         &'a self,
-        _ep: &'a Endpoint,
+        ep: &'a Endpoint,
     ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
-        // TODO: real health/diagnostics.
-        Box::pin(async move { Err(ServiceError::unimplemented("syncthing.status")) })
+        Box::pin(async move {
+            let base = ep.primary_url();
+            let base = base.trim_end_matches('/');
+            if base.is_empty() {
+                return Err(ServiceError::Other(format!(
+                    "syncthing instance '{}' has no URL-addressable route; \
+                     add one with `service.connect --route`",
+                    ep.name
+                )));
+            }
+
+            let client = Client::new();
+            let health: Health = api::get_json(&client, base, None, "/rest/noauth/health")
+                .map_err(ServiceError::Other)?;
+            let healthy = health.status.eq_ignore_ascii_case("ok");
+
+            // Version is best-effort detail: it needs the API key, and a missing
+            // key must not turn a live instance into an unhealthy one.
+            let detail = match api::api_key_opt(&ep.name).and_then(|k| {
+                api::get_json::<Version>(&client, base, Some(&k), "/rest/system/version").ok()
+            }) {
+                Some(v) => format!("{} ({})", health.status, v.version),
+                None => format!("{} (version needs an API key)", health.status),
+            };
+
+            Ok(ServiceStatus {
+                healthy,
+                detail,
+                ..Default::default()
+            })
+        })
     }
+}
+
+// ── Syncthing REST response shapes (only the fields `status` reads) ───────────
+
+/// `/rest/noauth/health` — `{"status":"OK"}`. Unauthenticated by design.
+#[derive(Debug, serde::Deserialize)]
+struct Health {
+    #[serde(default)]
+    status: String,
+}
+
+/// `/rest/system/version` — requires the API key.
+#[derive(Debug, serde::Deserialize)]
+struct Version {
+    #[serde(default)]
+    version: String,
 }
 
 #[cfg(test)]
