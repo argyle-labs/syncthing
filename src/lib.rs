@@ -13,7 +13,7 @@
 
 use plugin_toolkit::client::Client;
 use plugin_toolkit::service::{
-    BoxFuture, Endpoint, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
+    BoxFuture, Routes, Runtime, ServiceBackend, ServiceCapability, ServiceError, ServiceStatus,
     WorkloadSpec,
 };
 
@@ -26,7 +26,7 @@ pub use replication::SyncthingReplication;
 // the wire dispatch for both. This crate hand-writes no op-string routing.
 
 /// syncthing backend. Holds only the provider name; per-instance endpoint/creds
-/// come from the `Endpoint` the generic `service.*` tools hand each op.
+/// come from the instance id and `Routes` the generic `service.*` tools hand each op.
 #[derive(Debug, Clone)]
 pub struct SyncthingBackend {
     provider: &'static str,
@@ -75,7 +75,8 @@ impl ServiceBackend for SyncthingBackend {
     fn workload_spec<'a>(
         &'a self,
         _runtime: Runtime,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _routes: &'a Routes,
     ) -> BoxFuture<'a, Result<WorkloadSpec, ServiceError>> {
         // TODO: describe the syncthing workload (image/template, ports, mounts,
         // env) for the chosen runtime. The deploy target turns this into a
@@ -85,7 +86,8 @@ impl ServiceBackend for SyncthingBackend {
 
     fn configure<'a>(
         &'a self,
-        _ep: &'a Endpoint,
+        _instance: &'a str,
+        _routes: &'a Routes,
         _config: &'a str,
     ) -> BoxFuture<'a, Result<(), ServiceError>> {
         // TODO: apply syncthing-specific config idempotently.
@@ -99,22 +101,23 @@ impl ServiceBackend for SyncthingBackend {
     /// than erroring. When a key *is* configured the version is added as detail;
     /// its absence degrades detail, never health.
     ///
-    /// The URL comes from the endpoint's `routes` via [`Endpoint::primary_url`]
+    /// The URL comes from the instance's `routes` via [`Routes::primary_url`]
     /// (orca has no scalar `base_url` — reachability is the ordered route set).
-    /// An endpoint with no URL-addressable route is an unknown, not a false
+    /// An instance with no URL-addressable route is an unknown, not a false
     /// negative, so it is reported as an error rather than as "unhealthy".
     fn status<'a>(
         &'a self,
-        ep: &'a Endpoint,
+        instance: &'a str,
+        routes: &'a Routes,
     ) -> BoxFuture<'a, Result<ServiceStatus, ServiceError>> {
         Box::pin(async move {
-            let base = ep.primary_url();
+            let base = routes.primary_url();
             let base = base.trim_end_matches('/');
             if base.is_empty() {
                 return Err(ServiceError::Other(format!(
                     "syncthing instance '{}' has no URL-addressable route; \
                      add one with `service.connect --route`",
-                    ep.name
+                    instance
                 )));
             }
 
@@ -125,7 +128,7 @@ impl ServiceBackend for SyncthingBackend {
 
             // Version is best-effort detail: it needs the API key, and a missing
             // key must not turn a live instance into an unhealthy one.
-            let detail = match api::api_key_opt(&ep.name).and_then(|k| {
+            let detail = match api::api_key_opt(instance).and_then(|k| {
                 api::get_json::<Version>(&client, base, Some(&k), "/rest/system/version").ok()
             }) {
                 Some(v) => format!("{} ({})", health.status, v.version),
