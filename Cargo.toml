@@ -20,11 +20,11 @@ path = "src/main.rs"
 # ServiceBackend over the orca socket and reaches the whole orca system
 # through plugin-toolkit alone.
 [dependencies]
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", tag = "v0.2.1-rc.14" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-plugin-toolkit = { git = "https://github.com/argyle-labs/orca", branch = "main" }
+plugin-toolkit = { git = "https://github.com/argyle-labs/orca", tag = "v0.2.1-rc.14" }
 tokio    = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
 
