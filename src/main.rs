@@ -11,10 +11,14 @@ plugin_toolkit::instrument::bootstrap!();
 use plugin_toolkit::plugin::Plugin;
 use syncthing::{SyncthingBackend, SyncthingReplication};
 
+#[allow(unused_imports)]
+use syncthing::tools as _;
+
 fn main() -> plugin_toolkit::anyhow::Result<()> {
     Plugin::named("syncthing")
         .version(env!("CARGO_PKG_VERSION"))
         .service(SyncthingBackend::new("syncthing"))
         .replication(SyncthingReplication::new("syncthing"))
+        .tools(["syncthing."])
         .serve()
 }
