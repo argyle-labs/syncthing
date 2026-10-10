@@ -18,7 +18,9 @@ use plugin_toolkit::service::{
 };
 
 pub mod api;
+pub mod ignores;
 pub mod replication;
+pub mod tools;
 pub use replication::SyncthingReplication;
 
 // The service + replication backends are registered as typed facets on the
