@@ -83,6 +83,30 @@ pub fn get_json<T: serde::de::DeserializeOwned>(
     resp.json::<T>().map_err(|e| format!("decode {url}: {e}"))
 }
 
+/// `method` `{base}{path}` with a JSON body; the reply body is ignored.
+pub fn send_json<B: serde::Serialize>(
+    client: &Client,
+    method: &str,
+    base: &str,
+    key: &str,
+    path: &str,
+    body: &B,
+) -> Result<(), String> {
+    let url = format!("{base}{path}");
+    let req = Request::new(method, &url)
+        .timeout_ms(TIMEOUT_MS)
+        .header("X-API-Key", key)
+        .json(body)
+        .map_err(|e| format!("encode {method} {url}: {e}"))?;
+    let resp = client
+        .send(req)
+        .map_err(|e| format!("{method} {url}: {e}"))?;
+    if !resp.is_success() {
+        return Err(format!("{method} {url} → HTTP {}", resp.status));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
