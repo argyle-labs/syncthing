@@ -17,6 +17,7 @@ use plugin_toolkit::service::{
 };
 
 pub mod api;
+pub mod execute;
 pub mod ignores;
 pub mod replication;
 pub mod tools;
