@@ -113,7 +113,7 @@ impl SyncthingReplication {
 
     /// `member`'s API key. A missing key is a configuration gap, surfaced as an
     /// error so the member reads unhealthy (the gate holds).
-    fn api_key(member: &str) -> Result<String, StorageError> {
+    fn api_key(member: &str) -> Result<plugin_toolkit::secrets::Secret<String>, StorageError> {
         api::api_key(member).map_err(StorageError::Other)
     }
 
@@ -137,9 +137,10 @@ impl SyncthingReplication {
     ) -> Result<MemberHealth, StorageError> {
         let base = Self::base_url(member)?;
         let key = Self::api_key(member)?;
+        let key = key.expose_secret();
 
         // 1. Folder must exist and not be paused (diagnostics.md #2).
-        let folders: Vec<Folder> = Self::get_json(client, &base, &key, "/rest/config/folders")?;
+        let folders: Vec<Folder> = Self::get_json(client, &base, key, "/rest/config/folders")?;
         let Some(f) = folders.iter().find(|f| f.id == folder || f.label == folder) else {
             return Ok(MemberHealth {
                 in_sync: false,
@@ -154,7 +155,7 @@ impl SyncthingReplication {
         }
 
         // 2. Peer link must be up — otherwise "in sync" is stale (diagnostics.md #2).
-        let conns: Connections = Self::get_json(client, &base, &key, "/rest/system/connections")?;
+        let conns: Connections = Self::get_json(client, &base, key, "/rest/system/connections")?;
         let peer_connected = conns.connections.values().any(|c| c.connected);
         if !peer_connected {
             return Ok(MemberHealth {
@@ -167,7 +168,7 @@ impl SyncthingReplication {
         let status: DbStatus = Self::get_json(
             client,
             &base,
-            &key,
+            key,
             &format!("/rest/db/status?folder={}", f.id),
         )?;
         if status.errors > 0 {
@@ -201,8 +202,7 @@ impl SyncthingReplication {
 
         // 5. Cross-check the global error log for this folder (diagnostics.md #1,
         //    the silent path-mismatch killer). Non-fatal to fetch.
-        if let Ok(errs) = Self::get_json::<SystemErrors>(client, &base, &key, "/rest/system/error")
-        {
+        if let Ok(errs) = Self::get_json::<SystemErrors>(client, &base, key, "/rest/system/error") {
             if let Some(list) = errs.errors {
                 if let Some(e) = list.iter().find(|e| e.message.contains(&f.id)) {
                     return Ok(MemberHealth {

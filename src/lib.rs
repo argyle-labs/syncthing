@@ -121,7 +121,13 @@ impl ServiceBackend for SyncthingBackend {
             // Version is best-effort detail: it needs the API key, and a missing
             // key must not turn a live instance into an unhealthy one.
             let detail = match api::api_key_opt(instance).and_then(|k| {
-                api::get_json::<Version>(&client, base, Some(&k), "/rest/system/version").ok()
+                api::get_json::<Version>(
+                    &client,
+                    base,
+                    Some(k.expose_secret()),
+                    "/rest/system/version",
+                )
+                .ok()
             }) {
                 Some(v) => format!("{} ({})", health.status, v.version),
                 None => format!("{} (version needs an API key)", health.status),

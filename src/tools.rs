@@ -95,7 +95,7 @@ async fn syncthing_ignores_check_pbs(
 ) -> Result<IgnoresCheckPbs> {
     let base = api::base_url(&args.member).map_err(|e| anyhow!(e))?;
     let key = api::api_key(&args.member).map_err(|e| anyhow!(e))?;
-    check_pbs(&base, &key, &args.folder)
+    check_pbs(&base, key.expose_secret(), &args.folder)
 }
 
 #[orca_struct(args)]
@@ -233,7 +233,7 @@ async fn syncthing_ignore_perms_sync(
     execute::require_admin("syncthing.ignore_perms.sync", ctx)?;
     let base = api::base_url(&args.member).map_err(|e| anyhow!(e))?;
     let key = api::api_key(&args.member).map_err(|e| anyhow!(e))?;
-    ignore_perms_sync(&base, &key, &args.folder, args.dry_run)
+    ignore_perms_sync(&base, key.expose_secret(), &args.folder, args.dry_run)
 }
 
 #[cfg(test)]
