@@ -33,10 +33,11 @@ pub fn default_base_url(member: &str) -> String {
 /// Base REST URL for `member` — the `url` secret if set, else the port
 /// convention. Trailing slash trimmed so paths concatenate cleanly.
 pub fn base_url(member: &str) -> Result<String, String> {
-    let key = secrets::scoped_name(PROVIDER, member, "url");
-    let url = secrets::get(&key)
+    let key = secrets::scoped_name(PROVIDER, member, "url").map_err(|e| e.to_string())?;
+    let url = secrets::get(key.as_str())
         .map_err(|e| format!("read url secret for {member}: {e}"))?
-        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.expose_secret().trim().to_string())
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_base_url(member));
     Ok(url.trim_end_matches('/').to_string())
 }
@@ -44,9 +45,9 @@ pub fn base_url(member: &str) -> Result<String, String> {
 /// Resolve `member`'s API key from the secret store. A missing key is a
 /// configuration gap, surfaced as an error so the member reads unhealthy
 /// rather than silently "connected".
-pub fn api_key(member: &str) -> Result<String, String> {
-    let key = secrets::scoped_name(PROVIDER, member, "apikey");
-    secrets::get_required(&key)
+pub fn api_key(member: &str) -> Result<secrets::Secret<String>, String> {
+    let key = secrets::scoped_name(PROVIDER, member, "apikey").map_err(|e| e.to_string())?;
+    secrets::get_required(key.as_str())
         .map_err(|e| format!("no Syncthing API key for member '{member}' (secret '{key}'): {e}"))
 }
 
@@ -55,12 +56,12 @@ pub fn api_key(member: &str) -> Result<String, String> {
 /// Distinct from [`api_key`]: the unauthenticated health probe treats a missing
 /// key as "less detail available", not as a failure, so it must be able to tell
 /// an absent key from a broken secret store.
-pub fn api_key_opt(member: &str) -> Option<String> {
-    let key = secrets::scoped_name(PROVIDER, member, "apikey");
-    secrets::get(&key)
+pub fn api_key_opt(member: &str) -> Option<secrets::Secret<String>> {
+    let key = secrets::scoped_name(PROVIDER, member, "apikey").ok()?;
+    secrets::get(key.as_str())
         .ok()
         .flatten()
-        .filter(|s| !s.trim().is_empty())
+        .filter(|s| !s.expose_secret().trim().is_empty())
 }
 
 /// GET `{base}{path}`, decoding JSON into `T`. `key` is sent as `X-API-Key`
