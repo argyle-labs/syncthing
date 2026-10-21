@@ -2,6 +2,7 @@
 //!
 //!   - `syncthing.ignores.check_pbs`  whether a folder's ignore patterns exclude PBS datastore files
 //!   - `syncthing.ignore_perms.sync`  set a folder's `ignorePerms` so chmod failures stop blocking sync
+//!   - `syncthing.folders.health`     folders in error or stuck scanning
 
 use plugin_toolkit::client::Client;
 use plugin_toolkit::prelude::*;
@@ -236,6 +237,152 @@ async fn syncthing_ignore_perms_sync(
     ignore_perms_sync(&base, key.expose_secret(), &args.folder, args.dry_run)
 }
 
+#[orca_struct(args)]
+pub struct FoldersHealthArgs {
+    /// Syncthing member (host) whose REST API is read.
+    #[arg(long)]
+    pub member: String,
+    /// Seconds a folder may sit in a scanning state before it counts as stalled.
+    #[arg(long, default_value_t = 3600)]
+    #[serde(default = "default_scan_stall_secs")]
+    pub scan_stall_secs: i64,
+}
+
+fn default_scan_stall_secs() -> i64 {
+    3600
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderHealth {
+    pub folder: String,
+    pub label: String,
+    pub state: String,
+    pub state_age_secs: Option<i64>,
+    pub error: Option<String>,
+    pub errors: i64,
+    pub pull_errors: i64,
+    pub problems: Vec<String>,
+}
+
+#[orca_struct]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldersHealth {
+    pub member: String,
+    pub ok: bool,
+    pub folders: Vec<FolderHealth>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FolderRef {
+    id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    paused: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DbStatus {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    state_changed: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    errors: i64,
+    #[serde(default)]
+    pull_errors: i64,
+}
+
+const SCAN_STATES: [&str; 2] = ["scanning", "scan-waiting"];
+
+fn assess_folder(f: &FolderRef, st: DbStatus, now: i64, scan_stall_secs: i64) -> FolderHealth {
+    let state_age_secs = st
+        .state_changed
+        .as_deref()
+        .and_then(|t| plugin_toolkit::time::Timestamp::parse_rfc3339(t).ok())
+        .map(|t| now - t.unix_seconds());
+    let error = st.error.filter(|e| !e.is_empty());
+    let mut problems = Vec::new();
+    if st.state == "error" || error.is_some() {
+        problems.push(format!(
+            "folder in error: {}",
+            error.as_deref().unwrap_or(&st.state)
+        ));
+    }
+    if SCAN_STATES.contains(&st.state.as_str())
+        && state_age_secs.is_some_and(|a| a > scan_stall_secs)
+    {
+        problems.push(format!(
+            "{} for {}s (over {scan_stall_secs}s)",
+            st.state,
+            state_age_secs.unwrap_or_default()
+        ));
+    }
+    if st.pull_errors > 0 {
+        problems.push(format!("{} pull error(s)", st.pull_errors));
+    }
+    FolderHealth {
+        folder: f.id.clone(),
+        label: f.label.clone(),
+        state: st.state,
+        state_age_secs,
+        error,
+        errors: st.errors,
+        pull_errors: st.pull_errors,
+        problems,
+    }
+}
+
+pub fn folders_health(
+    member: &str,
+    base: &str,
+    key: &str,
+    scan_stall_secs: i64,
+) -> Result<FoldersHealth> {
+    let client = Client::new();
+    let folders: Vec<FolderRef> =
+        api::get_json(&client, base, Some(key), "/rest/config/folders").map_err(|e| anyhow!(e))?;
+    let now = plugin_toolkit::time::now().unix_seconds();
+    let mut out = Vec::new();
+    for f in folders.iter().filter(|f| !f.paused) {
+        let st: DbStatus = api::get_json(
+            &client,
+            base,
+            Some(key),
+            &format!("/rest/db/status?folder={}", encode(&f.id)),
+        )
+        .map_err(|e| anyhow!(e))?;
+        out.push(assess_folder(f, st, now, scan_stall_secs));
+    }
+    Ok(FoldersHealth {
+        member: member.to_string(),
+        ok: out.iter().all(|f| f.problems.is_empty()),
+        folders: out,
+    })
+}
+
+/// **Detection.** Report each unpaused folder's state and flag folders in
+/// error, with pull errors, or stuck scanning past `--scan-stall-secs`.
+/// Read-only.
+#[orca_tool(domain = "syncthing", verb = "folders.health", role = "any")]
+async fn syncthing_folders_health(
+    args: FoldersHealthArgs,
+    _ctx: &ToolCtx,
+) -> Result<FoldersHealth> {
+    let base = api::base_url(&args.member).map_err(|e| anyhow!(e))?;
+    let key = api::api_key(&args.member).map_err(|e| anyhow!(e))?;
+    folders_health(
+        &args.member,
+        &base,
+        key.expose_secret(),
+        args.scan_stall_secs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +464,52 @@ mod tests {
         .unwrap();
         assert!(c.ignore_perms);
         assert_eq!(c.path, "/backups");
+    }
+
+    fn status(json: &str) -> DbStatus {
+        plugin_toolkit::serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn folder_health_flags_error_and_stalled_scan() {
+        let f = FolderRef {
+            id: "pbs".into(),
+            label: "PBS".into(),
+            paused: false,
+        };
+        let now = plugin_toolkit::time::Timestamp::parse_rfc3339("2026-10-20T12:00:00Z")
+            .unwrap()
+            .unix_seconds();
+        let err = assess_folder(
+            &f,
+            status(
+                r#"{"state":"error","stateChanged":"2026-10-20T11:59:00Z","error":"folder path missing","errors":0,"pullErrors":2}"#,
+            ),
+            now,
+            3600,
+        );
+        assert_eq!(
+            err.problems,
+            vec!["folder in error: folder path missing", "2 pull error(s)"]
+        );
+        let stalled = assess_folder(
+            &f,
+            status(r#"{"state":"scanning","stateChanged":"2026-10-20T09:00:00.123456789+00:00"}"#),
+            now,
+            3600,
+        );
+        assert_eq!(stalled.state_age_secs, Some(10800));
+        assert_eq!(stalled.problems, vec!["scanning for 10800s (over 3600s)"]);
+        let fresh = assess_folder(
+            &f,
+            status(r#"{"state":"scanning","stateChanged":"2026-10-20T11:30:00Z"}"#),
+            now,
+            3600,
+        );
+        assert!(fresh.problems.is_empty());
+        let idle = assess_folder(&f, status(r#"{"state":"idle","error":""}"#), now, 3600);
+        assert!(idle.problems.is_empty());
+        assert_eq!(idle.error, None);
     }
 
     fn ig(json: &str) -> Ignores {
