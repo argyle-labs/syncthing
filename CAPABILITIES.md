@@ -11,16 +11,25 @@ status of a syncthing instance) and a `replication` **ReplicationStatusProvider*
       returns a typed `ReplicationStatus{healthy,detail}`. `healthy` is the **min
       over members and folder state** (present, not paused, peer connected,
       `needBytes==0`, no errors, not an empty-`sendreceive` deletion risk) per
-      `docs/diagnostics.md`. Adopts existing instances: per-member REST API key
-      from the orca secret store (`scoped_name("syncthing",<member>,"apikey")`),
-      base URL `http://<member>:8384` or a `…,"url"` secret override.
+      `docs/diagnostics.md`. Members are registered `syncthing` endpoint names;
+      each endpoint's routes give the REST URL and its `apikey` secret
+      (`syncthing.<endpoint>.apikey`, set by `syncthing.create --apikey`) the key.
 - [ ] `configure` — native folder/device **provisioning** from orca (next slice;
       Syncthing ships no OpenAPI/GraphQL spec, so codegen has nothing to consume —
       a vendored spec would be authored here if/when this surface grows).
 
 Wired to failover: attach a `storage.replication` relationship (provider
-`syncthing`, folder id, willow/maple routes) to a share; the gate then holds any
+`syncthing`, folder id, node-a/node-b routes) to a share; the gate then holds any
 route swap until this provider confirms the folder is in sync across members.
+
+## Transport security
+
+The endpoint's API key grants full control of the Syncthing node, so it is
+only sent over `https` routes. A keyed call against an `http` route is refused
+before any request carrying the key is made, with an error naming the endpoint.
+To fix: enable Syncthing GUI TLS (`gui.tls=true`) and set `insecure` on the
+endpoint for its self-signed cert, or opt in to plaintext with
+`allow_plaintext` (default `false`).
 
 ## Per-plugin code (the only work this repo owns)
 - [x] `provider` / `runtimes` / `default_port` / `capabilities` / `data_paths` — declarative descriptor

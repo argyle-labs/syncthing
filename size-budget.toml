@@ -1,0 +1,3 @@
+[size-check]
+size-pct = 30
+reason = "endpoint registry (#[endpoint_resource]) plus the delegated-http client for route resolution and secret-scoped API keys; one-time jump replacing caller-supplied host strings"
