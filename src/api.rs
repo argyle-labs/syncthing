@@ -67,10 +67,27 @@ pub fn api_key(endpoint: &str) -> Result<secrets::Secret<String>, String> {
         .map_err(|e| format!("syncthing endpoint '{endpoint}': {e}"))
 }
 
+/// Errors name `{endpoint}{path}`, never the route: tool errors reach
+/// `role = "any"` callers, and the host's transport error embeds the URL.
+fn scrub(err: impl std::fmt::Display, base: &str) -> String {
+    let authority = base.split_once("://").map_or(base, |(_, a)| a);
+    let host = authority
+        .rsplit_once(':')
+        .map_or(authority, |(h, _)| h)
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let mut msg = err.to_string().replace(base, "").replace(authority, "");
+    if !host.is_empty() {
+        msg = msg.replace(host, "<route>");
+    }
+    msg
+}
+
 /// GET `{base}{path}`, decoding JSON into `T`. `key` is sent as `X-API-Key`
 /// when `Some`; Syncthing's `/rest/noauth/*` paths need no key.
 pub fn get_json<T: serde::de::DeserializeOwned>(
     client: &Client,
+    endpoint: &str,
     base: &str,
     key: Option<&str>,
     path: &str,
@@ -80,17 +97,21 @@ pub fn get_json<T: serde::de::DeserializeOwned>(
     if let Some(k) = key {
         req = req.header("X-API-Key", k);
     }
-    let resp = client.send(req).map_err(|e| format!("GET {url}: {e}"))?;
+    let resp = client
+        .send(req)
+        .map_err(|e| format!("GET {endpoint}{path}: {}", scrub(e, base)))?;
     if !resp.is_success() {
-        return Err(format!("GET {url} → HTTP {}", resp.status));
+        return Err(format!("GET {endpoint}{path} → HTTP {}", resp.status));
     }
-    resp.json::<T>().map_err(|e| format!("decode {url}: {e}"))
+    resp.json::<T>()
+        .map_err(|e| format!("decode {endpoint}{path}: {}", scrub(e, base)))
 }
 
 /// `method` `{base}{path}` with a JSON body; the reply body is ignored.
 pub fn send_json<B: serde::Serialize>(
     client: &Client,
     method: &str,
+    endpoint: &str,
     base: &str,
     key: &str,
     path: &str,
@@ -101,12 +122,12 @@ pub fn send_json<B: serde::Serialize>(
         .timeout_ms(TIMEOUT_MS)
         .header("X-API-Key", key)
         .json(body)
-        .map_err(|e| format!("encode {method} {url}: {e}"))?;
+        .map_err(|e| format!("encode {method} {endpoint}{path}: {}", scrub(e, base)))?;
     let resp = client
         .send(req)
-        .map_err(|e| format!("{method} {url}: {e}"))?;
+        .map_err(|e| format!("{method} {endpoint}{path}: {}", scrub(e, base)))?;
     if !resp.is_success() {
-        return Err(format!("{method} {url} → HTTP {}", resp.status));
+        return Err(format!("{method} {endpoint}{path} → HTTP {}", resp.status));
     }
     Ok(())
 }
@@ -120,6 +141,48 @@ mod tests {
         let name = secrets::scoped_name(PROVIDER, "node-a", "apikey").unwrap();
         assert_eq!(name.as_str(), "syncthing.node-a.apikey");
         assert!(plugin_toolkit::runtime::validate_endpoint_name("192.0.2.10").is_err());
+    }
+
+    #[test]
+    fn transport_error_names_endpoint_not_route() {
+        let base = "https://192.0.2.10:8384";
+        let sink = Box::new(|_cap: &str, _op: &str| -> Result<String, String> {
+            Err(
+                "error sending request for url (https://192.0.2.10:8384/rest/db/status): \
+                 connection refused by 192.0.2.10"
+                    .into(),
+            )
+        });
+        let get = plugin_toolkit::capsink::with_cap_sink(sink, || {
+            get_json::<plugin_toolkit::serde_json::Value>(
+                &Client::new(),
+                "node-a",
+                base,
+                Some("k"),
+                "/rest/db/status",
+            )
+            .unwrap_err()
+        });
+        let sink = Box::new(|_cap: &str, _op: &str| -> Result<String, String> {
+            Err("error sending request for url (https://192.0.2.10:8384/rest/db/status)".into())
+        });
+        let send = plugin_toolkit::capsink::with_cap_sink(sink, || {
+            send_json(
+                &Client::new(),
+                "PATCH",
+                "node-a",
+                base,
+                "k",
+                "/rest/db/status",
+                &1,
+            )
+            .unwrap_err()
+        });
+        for err in [get, send] {
+            assert!(err.contains("node-a/rest/db/status"), "{err}");
+            assert!(!err.contains("192.0.2.10"), "{err}");
+            assert!(!err.contains("8384"), "{err}");
+        }
     }
 
     #[test]

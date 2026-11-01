@@ -96,9 +96,15 @@ fn evaluate(folder: &str, ig: Ignores) -> IgnoresCheckPbs {
     }
 }
 
-pub fn check_pbs(base: &str, key: &str, folder: &str) -> Result<IgnoresCheckPbs> {
-    let ig: Ignores = api::get_json(&Client::new(), base, Some(key), &ignores_path(folder))
-        .map_err(|e| anyhow!(e))?;
+pub fn check_pbs(endpoint: &str, base: &str, key: &str, folder: &str) -> Result<IgnoresCheckPbs> {
+    let ig: Ignores = api::get_json(
+        &Client::new(),
+        endpoint,
+        base,
+        Some(key),
+        &ignores_path(folder),
+    )
+    .map_err(|e| anyhow!(e))?;
     Ok(evaluate(folder, ig))
 }
 
@@ -111,7 +117,7 @@ async fn syncthing_ignores_check_pbs(
     _ctx: &ToolCtx,
 ) -> Result<IgnoresCheckPbs> {
     let t = api::resolve(&args.name).await.map_err(|e| anyhow!(e))?;
-    check_pbs(&t.base, t.key.expose_secret(), &args.folder)
+    check_pbs(&args.name, &t.base, t.key.expose_secret(), &args.folder)
 }
 
 #[orca_struct(args)]
@@ -188,16 +194,24 @@ fn folder_config_path(folder: &str) -> String {
 }
 
 pub fn ignore_perms_sync(
+    endpoint: &str,
     base: &str,
     key: &str,
     folder: &str,
     dry_run: bool,
 ) -> Result<IgnorePermsSync> {
     let client = Client::new();
-    let cfg: FolderConfig = api::get_json(&client, base, Some(key), &folder_config_path(folder))
-        .map_err(|e| anyhow!(e))?;
+    let cfg: FolderConfig = api::get_json(
+        &client,
+        endpoint,
+        base,
+        Some(key),
+        &folder_config_path(folder),
+    )
+    .map_err(|e| anyhow!(e))?;
     let errs: FolderErrors = api::get_json(
         &client,
+        endpoint,
         base,
         Some(key),
         &format!("/rest/folder/errors?folder={}", encode(folder)),
@@ -208,15 +222,21 @@ pub fn ignore_perms_sync(
         api::send_json(
             &client,
             "PATCH",
+            endpoint,
             base,
             key,
             &folder_config_path(folder),
             &plugin_toolkit::serde_json::json!({ "ignorePerms": true }),
         )
         .map_err(|e| anyhow!(e))?;
-        let after: FolderConfig =
-            api::get_json(&client, base, Some(key), &folder_config_path(folder))
-                .map_err(|e| anyhow!(e))?;
+        let after: FolderConfig = api::get_json(
+            &client,
+            endpoint,
+            base,
+            Some(key),
+            &folder_config_path(folder),
+        )
+        .map_err(|e| anyhow!(e))?;
         if !after.ignore_perms {
             bail!("syncthing did not take ignorePerms on folder {folder}");
         }
@@ -248,7 +268,13 @@ async fn syncthing_ignore_perms_sync(
 ) -> Result<IgnorePermsSync> {
     execute::require_admin("syncthing.ignore_perms.sync", ctx)?;
     let t = api::resolve(&args.name).await.map_err(|e| anyhow!(e))?;
-    ignore_perms_sync(&t.base, t.key.expose_secret(), &args.folder, args.dry_run)
+    ignore_perms_sync(
+        &args.name,
+        &t.base,
+        t.key.expose_secret(),
+        &args.folder,
+        args.dry_run,
+    )
 }
 
 #[orca_struct(args)]
@@ -359,12 +385,14 @@ pub fn folders_health(
 ) -> Result<FoldersHealth> {
     let client = Client::new();
     let folders: Vec<FolderRef> =
-        api::get_json(&client, base, Some(key), "/rest/config/folders").map_err(|e| anyhow!(e))?;
+        api::get_json(&client, endpoint, base, Some(key), "/rest/config/folders")
+            .map_err(|e| anyhow!(e))?;
     let now = plugin_toolkit::time::now().unix_seconds();
     let mut out = Vec::new();
     for f in folders.iter().filter(|f| !f.paused) {
         let st: DbStatus = api::get_json(
             &client,
+            endpoint,
             base,
             Some(key),
             &format!("/rest/db/status?folder={}", encode(&f.id)),

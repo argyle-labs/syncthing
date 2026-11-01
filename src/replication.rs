@@ -107,11 +107,12 @@ impl SyncthingReplication {
     /// GET `{base}{path}` with the API key header, decoding JSON into `T`.
     fn get_json<T: serde::de::DeserializeOwned>(
         client: &Client,
+        member: &str,
         base: &str,
         key: &str,
         path: &str,
     ) -> Result<T, StorageError> {
-        api::get_json(client, base, Some(key), path).map_err(StorageError::Transport)
+        api::get_json(client, member, base, Some(key), path).map_err(StorageError::Transport)
     }
 
     /// Observe one member's health for `folder`, applying the `diagnostics.md`
@@ -127,7 +128,8 @@ impl SyncthingReplication {
         let key = t.key.expose_secret();
 
         // 1. Folder must exist and not be paused (diagnostics.md #2).
-        let folders: Vec<Folder> = Self::get_json(client, &base, key, "/rest/config/folders")?;
+        let folders: Vec<Folder> =
+            Self::get_json(client, member, &base, key, "/rest/config/folders")?;
         let Some(f) = folders.iter().find(|f| f.id == folder || f.label == folder) else {
             return Ok(MemberHealth {
                 in_sync: false,
@@ -142,7 +144,8 @@ impl SyncthingReplication {
         }
 
         // 2. Peer link must be up — otherwise "in sync" is stale (diagnostics.md #2).
-        let conns: Connections = Self::get_json(client, &base, key, "/rest/system/connections")?;
+        let conns: Connections =
+            Self::get_json(client, member, &base, key, "/rest/system/connections")?;
         let peer_connected = conns.connections.values().any(|c| c.connected);
         if !peer_connected {
             return Ok(MemberHealth {
@@ -154,6 +157,7 @@ impl SyncthingReplication {
         // 3. Folder db-status: fully in sync, no errors (the core signal).
         let status: DbStatus = Self::get_json(
             client,
+            member,
             &base,
             key,
             &format!("/rest/db/status?folder={}", f.id),
@@ -189,7 +193,9 @@ impl SyncthingReplication {
 
         // 5. Cross-check the global error log for this folder (diagnostics.md #1,
         //    the silent path-mismatch killer). Non-fatal to fetch.
-        if let Ok(errs) = Self::get_json::<SystemErrors>(client, &base, key, "/rest/system/error") {
+        if let Ok(errs) =
+            Self::get_json::<SystemErrors>(client, member, &base, key, "/rest/system/error")
+        {
             if let Some(list) = errs.errors {
                 if let Some(e) = list.iter().find(|e| e.message.contains(&f.id)) {
                     return Ok(MemberHealth {

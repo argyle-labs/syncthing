@@ -113,23 +113,25 @@ impl ServiceBackend for SyncthingBackend {
                 )));
             }
             let target = api::resolve(instance).await;
-            probe(&Client::new(), base, target)
+            probe(&Client::new(), instance, base, target)
         })
     }
 }
 
 fn probe(
     client: &Client,
+    instance: &str,
     health_base: &str,
     target: Result<api::Target, String>,
 ) -> Result<ServiceStatus, ServiceError> {
-    let health: Health = api::get_json(client, health_base, None, "/rest/noauth/health")
+    let health: Health = api::get_json(client, instance, health_base, None, "/rest/noauth/health")
         .map_err(ServiceError::Other)?;
     let healthy = health.status.eq_ignore_ascii_case("ok");
 
     let detail = match target.and_then(|t| {
         api::get_json::<Version>(
             client,
+            instance,
             &t.base,
             Some(t.key.expose_secret()),
             "/rest/system/version",
@@ -209,7 +211,12 @@ mod tests {
             key: plugin_toolkit::secrets::Secret::new("k".to_string()),
         };
         let st = capture(std::sync::Arc::clone(&seen), || {
-            probe(&Client::new(), "http://service.test:8384", Ok(target))
+            probe(
+                &Client::new(),
+                "svc",
+                "http://service.test:8384",
+                Ok(target),
+            )
         })
         .unwrap();
         assert_eq!(st.detail, "OK (v1.27.0)");
@@ -231,6 +238,7 @@ mod tests {
         let st = capture(std::sync::Arc::clone(&seen), || {
             probe(
                 &Client::new(),
+                "svc",
                 "http://service.test:8384",
                 Err("no endpoint 'x'".into()),
             )
