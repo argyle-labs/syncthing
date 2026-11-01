@@ -15,13 +15,6 @@ use syncthing::{SyncthingBackend, SyncthingReplication};
 use syncthing::tools as _;
 
 fn main() -> plugin_toolkit::anyhow::Result<()> {
-    plugin_toolkit::logging::init(plugin_toolkit::logging::LogInit {
-        env_var: "ORCA_LOG",
-        default_filter: "info",
-        tee_path: None,
-        tee_max_bytes: None,
-        tee_keep: None,
-    })?;
     Plugin::named("syncthing")
         .version(env!("CARGO_PKG_VERSION"))
         .service(SyncthingBackend::new("syncthing"))
