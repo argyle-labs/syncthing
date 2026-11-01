@@ -67,91 +67,72 @@ pub fn api_key(endpoint: &str) -> Result<secrets::Secret<String>, String> {
         .map_err(|e| format!("syncthing endpoint '{endpoint}': {e}"))
 }
 
-/// Errors name `{endpoint}{path}`, never the route: tool errors reach
-/// `role = "any"` callers, and the host's transport error embeds the URL.
-fn scrub(err: impl std::fmt::Display, base: &str) -> String {
-    let Some(host) = route_host(base) else {
-        return err.to_string();
-    };
-    let mut needles = vec![host.clone()];
-    if host.contains(':') {
-        needles.insert(0, format!("[{host}]"));
-    }
-    let mut msg = err.to_string();
-    for needle in &needles {
-        msg = replace_tokens(&msg, needle);
-    }
-    msg
+/// The kind of a transport failure. Tool errors reach `role = "any"` callers
+/// and the host's error text embeds the route, so only the kind is surfaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorKind {
+    ConnectionRefused,
+    Timeout,
+    Tls,
+    Dns,
+    Unreachable,
+    Other,
 }
 
-/// The lowercased host of `base`, IPv6 without brackets.
-fn route_host(base: &str) -> Option<String> {
-    let rest = base.split_once("://").map_or(base, |(_, r)| r);
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
-    let host = match authority.strip_prefix('[') {
-        Some(v6) => v6.split_once(']')?.0,
-        None => authority.split(':').next()?,
-    };
-    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+impl ErrorKind {
+    fn classify(err: &plugin_toolkit::anyhow::Error) -> Self {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind as Io;
+            match io.kind() {
+                Io::ConnectionRefused => return Self::ConnectionRefused,
+                Io::TimedOut => return Self::Timeout,
+                Io::HostUnreachable | Io::NetworkUnreachable => return Self::Unreachable,
+                _ => {}
+            }
+        }
+        let text = format!("{err:#}").to_ascii_lowercase();
+        let has = |words: &[&str]| words.iter().any(|w| text.contains(w));
+        if has(&["connection refused", "refused"]) {
+            Self::ConnectionRefused
+        } else if has(&["timed out", "timeout", "deadline"]) {
+            Self::Timeout
+        } else if has(&["tls", "ssl", "certificate", "handshake"]) {
+            Self::Tls
+        } else if has(&["dns", "resolve", "lookup", "name or service", "nodename"]) {
+            Self::Dns
+        } else if has(&["unreachable", "no route"]) {
+            Self::Unreachable
+        } else {
+            Self::Other
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ConnectionRefused => "ConnectionRefused",
+            Self::Timeout => "Timeout",
+            Self::Tls => "Tls",
+            Self::Dns => "Dns",
+            Self::Unreachable => "Unreachable",
+            Self::Other => "Other",
+        }
+    }
 }
 
-/// Replace each whole-token occurrence of `needle` (already lowercase) with
-/// `<route>`, absorbing a leading `scheme://`, a trailing `:port`, and, for a
-/// URL, its path.
-fn replace_tokens(msg: &str, needle: &str) -> String {
-    let lower = msg.to_ascii_lowercase();
-    let bytes = msg.as_bytes();
-    let is_host = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':');
-    let mut out = String::with_capacity(msg.len());
-    let mut copied = 0;
-    let mut from = 0;
-    while let Some(off) = lower[from..].find(needle) {
-        let at = from + off;
-        let mut end = at + needle.len();
-        from = end;
-        let before_ok = at == 0
-            || !is_host(bytes[at - 1])
-            || bytes[at - 1] == b':' && at >= 3 && &bytes[at - 3..at] == b"://";
-        let after_ok = end == bytes.len() || !is_host(bytes[end]) || bytes[end] == b':';
-        if !before_ok || !after_ok {
-            continue;
-        }
-        let mut start = at;
-        let is_url = at >= 3 && &bytes[at - 3..at] == b"://";
-        if is_url {
-            start = at - 3;
-            while start > 0 && bytes[start - 1].is_ascii_alphabetic() {
-                start -= 1;
-            }
-        }
-        if end < bytes.len() && bytes[end] == b':' {
-            let digits = bytes[end + 1..]
-                .iter()
-                .take_while(|b| b.is_ascii_digit())
-                .count();
-            if digits > 0 {
-                end += 1 + digits;
-            }
-        }
-        if is_url {
-            end += bytes[end..]
-                .iter()
-                .take_while(|&&b| {
-                    !b.is_ascii_whitespace() && !matches!(b, b')' | b'"' | b'\'' | b'>' | b',')
-                })
-                .count();
-            while matches!(bytes[end - 1], b':' | b'.' | b';') {
-                end -= 1;
-            }
-        }
-        out.push_str(&msg[copied..start]);
-        out.push_str("<route>");
-        copied = end;
-        from = end;
-    }
-    out.push_str(&msg[copied..]);
-    out
+fn transport_error(
+    method: &str,
+    endpoint: &str,
+    path: &str,
+    err: plugin_toolkit::anyhow::Error,
+) -> String {
+    let kind = ErrorKind::classify(&err);
+    plugin_toolkit::tracing::debug!(endpoint, path, method, error = %format!("{err:#}"), "syncthing request failed");
+    format!("{method} {endpoint}{path}: {}", kind.as_str())
+}
+
+fn malformed(endpoint: &str, path: &str, err: plugin_toolkit::anyhow::Error) -> String {
+    plugin_toolkit::tracing::debug!(endpoint, path, error = %format!("{err:#}"), "syncthing response malformed");
+    format!("{endpoint}{path}: malformed response")
 }
 
 /// GET `{base}{path}`, decoding JSON into `T`. `key` is sent as `X-API-Key`
@@ -170,12 +151,11 @@ pub fn get_json<T: serde::de::DeserializeOwned>(
     }
     let resp = client
         .send(req)
-        .map_err(|e| format!("GET {endpoint}{path}: {}", scrub(e, base)))?;
+        .map_err(|e| transport_error("GET", endpoint, path, e))?;
     if !resp.is_success() {
-        return Err(format!("GET {endpoint}{path} → HTTP {}", resp.status));
+        return Err(format!("{endpoint}{path}: HTTP {}", resp.status));
     }
-    resp.json::<T>()
-        .map_err(|e| format!("decode {endpoint}{path}: {}", scrub(e, base)))
+    resp.json::<T>().map_err(|e| malformed(endpoint, path, e))
 }
 
 /// `method` `{base}{path}` with a JSON body; the reply body is ignored.
@@ -193,12 +173,12 @@ pub fn send_json<B: serde::Serialize>(
         .timeout_ms(TIMEOUT_MS)
         .header("X-API-Key", key)
         .json(body)
-        .map_err(|e| format!("encode {method} {endpoint}{path}: {}", scrub(e, base)))?;
+        .map_err(|e| format!("encode {method} {endpoint}{path}: {e}"))?;
     let resp = client
         .send(req)
-        .map_err(|e| format!("{method} {endpoint}{path}: {}", scrub(e, base)))?;
+        .map_err(|e| transport_error(method, endpoint, path, e))?;
     if !resp.is_success() {
-        return Err(format!("{method} {endpoint}{path} → HTTP {}", resp.status));
+        return Err(format!("{endpoint}{path}: HTTP {}", resp.status));
     }
     Ok(())
 }
@@ -256,67 +236,80 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scrub_matches_host_case_insensitively() {
-        let msg = scrub(
-            "connect to HTTPS://NAS.Example.COM:8384/rest failed",
-            "https://nas.example.com:8384",
-        );
-        assert_eq!(msg, "connect to <route> failed");
+    fn get_err(host_err: &str) -> String {
+        let host_err = host_err.to_string();
+        let sink = Box::new(move |_cap: &str, _op: &str| -> Result<String, String> {
+            Err(host_err.clone())
+        });
+        plugin_toolkit::capsink::with_cap_sink(sink, || {
+            get_json::<plugin_toolkit::serde_json::Value>(
+                &Client::new(),
+                "node-a",
+                "https://nas.lan:8384",
+                Some("k"),
+                "/rest/db/status",
+            )
+            .unwrap_err()
+        })
     }
 
     #[test]
-    fn scrub_handles_elided_default_port() {
-        let msg = scrub(
-            "dns error for https://nas.lan:443/rest/db and nas.lan",
-            "https://nas.lan",
-        );
-        assert_eq!(msg, "dns error for <route> and <route>");
+    fn leak_cases_never_reach_the_message() {
+        let cases = [
+            ("connection refused by nas.lan.", "nas.lan"),
+            ("dial tcp:nas.lan:8384 refused", "nas.lan"),
+            ("connect to ::ffff:192.0.2.10 timed out", "192.0.2.10"),
+            (
+                "url https://admin:pw@nas.lan:8384/rest: tls handshake eof",
+                "admin",
+            ),
+            ("dns error for nas%2Elan", "nas%2elan"),
+            ("dns lookup xn--nas-cpa.lan failed", "xn--nas"),
+        ];
+        for (host_err, secret) in cases {
+            let err = get_err(host_err);
+            let lower = err.to_ascii_lowercase();
+            assert!(!lower.contains(secret), "{err}");
+            assert!(!lower.contains("8384"), "{err}");
+            assert!(!lower.contains("nas"), "{err}");
+            assert!(err.starts_with("GET node-a/rest/db/status: "), "{err}");
+        }
     }
 
     #[test]
-    fn scrub_handles_route_with_trailing_path() {
-        let msg = scrub(
-            "GET https://nas.lan/sync/rest/x: refused by nas.lan:443",
-            "https://nas.lan/sync",
-        );
-        assert_eq!(msg, "GET <route>: refused by <route>");
+    fn each_kind_is_classified() {
+        let cases = [
+            (
+                "error sending request: Connection refused (os error 61)",
+                "ConnectionRefused",
+            ),
+            ("operation timed out", "Timeout"),
+            ("invalid peer certificate: UnknownIssuer", "Tls"),
+            ("dns error: failed to lookup address information", "Dns"),
+            ("No route to host (os error 65)", "Unreachable"),
+            ("connection reset by peer", "Other"),
+        ];
+        for (host_err, kind) in cases {
+            assert_eq!(
+                get_err(host_err),
+                format!("GET node-a/rest/db/status: {kind}")
+            );
+        }
     }
 
     #[test]
-    fn scrub_handles_ipv6_with_port() {
-        let msg = scrub(
-            "url (https://[::1]:8384/rest): refused by [::1]:8384 at ::1",
-            "https://[::1]:8384",
-        );
-        assert_eq!(msg, "url (<route>): refused by <route> at <route>");
-    }
-
-    #[test]
-    fn scrub_handles_ipv6_without_port() {
-        let msg = scrub(
-            "tls handshake with [fe80::1] at 10:42: eof",
-            "https://[FE80::1]",
-        );
-        assert_eq!(msg, "tls handshake with <route> at 10:42: eof");
-    }
-
-    #[test]
-    fn scrub_leaves_words_containing_a_short_host() {
-        let msg = scrub(
-            "status: st: refused; first stage at st:8384",
-            "https://st:8384",
-        );
-        assert_eq!(msg, "status: <route>: refused; first stage at <route>");
-    }
-
-    #[test]
-    fn scrub_keeps_message_readable() {
-        let msg = scrub("error sending request for url (https://192.0.2.10:8384/rest/db/status): connection refused", "https://192.0.2.10:8384");
-        assert_eq!(
-            msg,
-            "error sending request for url (<route>): connection refused"
-        );
+    fn io_errors_classify_by_kind() {
+        use std::io::{Error, ErrorKind as Io};
+        let cases = [
+            (Io::ConnectionRefused, ErrorKind::ConnectionRefused),
+            (Io::TimedOut, ErrorKind::Timeout),
+            (Io::HostUnreachable, ErrorKind::Unreachable),
+            (Io::NetworkUnreachable, ErrorKind::Unreachable),
+        ];
+        for (io, kind) in cases {
+            let err = plugin_toolkit::anyhow::Error::new(Error::new(io, "x"));
+            assert_eq!(ErrorKind::classify(&err), kind);
+        }
     }
 
     #[test]
