@@ -5,7 +5,8 @@
 //! active mount off a source until the replication relationship the share
 //! references is **confirmed healthy**. Core ships no provider, so today that
 //! signal is always *Unknown* (the gate holds). This module supplies the
-//! `syncthing` provider: given a folder id and the member hosts, it reads each
+//! `syncthing` provider: given a folder id and the members — registered
+//! `syncthing` endpoint names — it reads each
 //! member's Syncthing REST API and answers "is this folder in sync across every
 //! member, right now?".
 //!
@@ -16,10 +17,8 @@
 //! errors, is fully in sync (`needBytes == 0`), and is not an empty
 //! `sendreceive` side that could propagate deletions.
 //!
-//! Credentials are orca-native: each member's REST API key lives in the orca
-//! secret store under `scoped_name("syncthing", <member>, "apikey")`; the base
-//! URL defaults to `http://<member>:8384` and may be overridden by a
-//! `scoped_name("syncthing", <member>, "url")` secret.
+//! Credentials and reachability come from the endpoint registry
+//! ([`api::resolve`]): the endpoint's routes and its `apikey` secret.
 
 use crate::api;
 use plugin_toolkit::client::Client;
@@ -105,18 +104,6 @@ struct MemberHealth {
 }
 
 impl SyncthingReplication {
-    /// Base REST URL for `member`. Delegates to [`api::base_url`]; the
-    /// credential/URL convention is shared with the service `status` probe.
-    fn base_url(member: &str) -> Result<String, StorageError> {
-        api::base_url(member).map_err(StorageError::Other)
-    }
-
-    /// `member`'s API key. A missing key is a configuration gap, surfaced as an
-    /// error so the member reads unhealthy (the gate holds).
-    fn api_key(member: &str) -> Result<plugin_toolkit::secrets::Secret<String>, StorageError> {
-        api::api_key(member).map_err(StorageError::Other)
-    }
-
     /// GET `{base}{path}` with the API key header, decoding JSON into `T`.
     fn get_json<T: serde::de::DeserializeOwned>(
         client: &Client,
@@ -130,14 +117,14 @@ impl SyncthingReplication {
     /// Observe one member's health for `folder`, applying the `diagnostics.md`
     /// checks. Any transport/config failure is an `Err` — the caller treats a
     /// failed member as not-in-sync, never as healthy.
-    fn member_health(
+    async fn member_health(
         client: &Client,
         member: &str,
         folder: &str,
     ) -> Result<MemberHealth, StorageError> {
-        let base = Self::base_url(member)?;
-        let key = Self::api_key(member)?;
-        let key = key.expose_secret();
+        let t = api::resolve(member).await.map_err(StorageError::Other)?;
+        let base = t.base;
+        let key = t.key.expose_secret();
 
         // 1. Folder must exist and not be paused (diagnostics.md #2).
         let folders: Vec<Folder> = Self::get_json(client, &base, key, "/rest/config/folders")?;
@@ -244,7 +231,7 @@ impl ReplicationStatusProvider for SyncthingReplication {
         let mut notes = Vec::with_capacity(members.len());
         let mut all_in_sync = true;
         for member in members {
-            match Self::member_health(&client, member, folder) {
+            match Self::member_health(&client, member, folder).await {
                 Ok(h) => {
                     all_in_sync &= h.in_sync;
                     notes.push(h.note);
@@ -272,13 +259,5 @@ mod tests {
     #[test]
     fn declares_provider_name() {
         assert_eq!(SyncthingReplication::new("syncthing").name(), "syncthing");
-    }
-
-    #[test]
-    fn base_url_defaults_to_port_convention() {
-        // The fallback used when a member has no `url` secret override.
-        // Convention now lives in `api`; asserted here too so a change to it
-        // is visibly a change to replication's behaviour.
-        assert_eq!(api::default_base_url("10.0.0.10"), "http://10.0.0.10:8384");
     }
 }

@@ -11,10 +11,10 @@
 //! either domain so neither facet drags in the other's types.
 
 use plugin_toolkit::client::{Client, Request};
+use plugin_toolkit::route;
 use plugin_toolkit::secrets;
 
-/// Default Syncthing GUI/REST port. Overridable per member via a `url` secret.
-pub const DEFAULT_PORT: u16 = 8384;
+use crate::tools::endpoint_db;
 
 /// Provider name — the string a relationship's `provider` field carries, and
 /// the scope every secret below is keyed under.
@@ -24,43 +24,40 @@ pub const PROVIDER: &str = "syncthing";
 /// hangs is a failed probe, not a slow one.
 const TIMEOUT_MS: u64 = 8_000;
 
-/// The port-convention base URL for a member with no `url` secret override.
-/// Pure — no runtime/secret dependency, so the convention is unit-testable.
-pub fn default_base_url(member: &str) -> String {
-    format!("http://{member}:{DEFAULT_PORT}")
+/// A registered endpoint's reachable base URL and API key.
+pub struct Target {
+    pub base: String,
+    pub key: secrets::Secret<String>,
 }
 
-/// Base REST URL for `member` — the `url` secret if set, else the port
-/// convention. Trailing slash trimmed so paths concatenate cleanly.
-pub fn base_url(member: &str) -> Result<String, String> {
-    let key = secrets::scoped_name(PROVIDER, member, "url").map_err(|e| e.to_string())?;
-    let url = secrets::get(key.as_str())
-        .map_err(|e| format!("read url secret for {member}: {e}"))?
-        .map(|s| s.expose_secret().trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_base_url(member));
-    Ok(url.trim_end_matches('/').to_string())
+/// Resolve a registered `syncthing` endpoint: the first reachable route and the
+/// API key stored against the endpoint by `syncthing.create --apikey`.
+pub async fn resolve(endpoint: &str) -> Result<Target, String> {
+    let row = endpoint_db::require(endpoint).map_err(|e| e.to_string())?;
+    let key = api_key(endpoint)?;
+    let base = route::resolve_reachable(endpoint, &row.routes, row.insecure)
+        .await
+        .map_err(|e| format!("syncthing endpoint '{endpoint}': {e}"))?;
+    Ok(Target {
+        base: base.trim_end_matches('/').to_string(),
+        key,
+    })
 }
 
-/// Resolve `member`'s API key from the secret store. A missing key is a
-/// configuration gap, surfaced as an error so the member reads unhealthy
-/// rather than silently "connected".
-pub fn api_key(member: &str) -> Result<secrets::Secret<String>, String> {
-    let key = secrets::scoped_name(PROVIDER, member, "apikey").map_err(|e| e.to_string())?;
-    secrets::get_required(key.as_str())
-        .map_err(|e| format!("no Syncthing API key for member '{member}' (secret '{key}'): {e}"))
+/// `endpoint`'s API key. A missing key is a configuration gap, surfaced as an
+/// error so the endpoint reads unhealthy rather than silently "connected".
+pub fn api_key(endpoint: &str) -> Result<secrets::Secret<String>, String> {
+    secrets::resolve_scoped(PROVIDER, endpoint, "apikey")
+        .map_err(|e| format!("syncthing endpoint '{endpoint}': {e}"))
 }
 
-/// `member`'s API key if one is configured, else `None`.
+/// `endpoint`'s API key if one is configured, else `None`.
 ///
 /// Distinct from [`api_key`]: the unauthenticated health probe treats a missing
-/// key as "less detail available", not as a failure, so it must be able to tell
-/// an absent key from a broken secret store.
-pub fn api_key_opt(member: &str) -> Option<secrets::Secret<String>> {
-    let key = secrets::scoped_name(PROVIDER, member, "apikey").ok()?;
-    secrets::get(key.as_str())
+/// key as "less detail available", not as a failure.
+pub fn api_key_opt(endpoint: &str) -> Option<secrets::Secret<String>> {
+    api_key(endpoint)
         .ok()
-        .flatten()
         .filter(|s| !s.expose_secret().trim().is_empty())
 }
 
@@ -113,7 +110,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_url_defaults_to_port_convention() {
-        assert_eq!(default_base_url("10.0.0.10"), "http://10.0.0.10:8384");
+    fn apikey_is_keyed_to_the_endpoint_not_its_address() {
+        let name = secrets::scoped_name(PROVIDER, "willow", "apikey").unwrap();
+        assert_eq!(name.as_str(), "syncthing.willow.apikey");
+        assert!(plugin_toolkit::runtime::validate_endpoint_name("10.10.10.10").is_err());
     }
 }

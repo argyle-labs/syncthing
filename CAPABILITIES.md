@@ -11,9 +11,9 @@ status of a syncthing instance) and a `replication` **ReplicationStatusProvider*
       returns a typed `ReplicationStatus{healthy,detail}`. `healthy` is the **min
       over members and folder state** (present, not paused, peer connected,
       `needBytes==0`, no errors, not an empty-`sendreceive` deletion risk) per
-      `docs/diagnostics.md`. Adopts existing instances: per-member REST API key
-      from the orca secret store (`scoped_name("syncthing",<member>,"apikey")`),
-      base URL `http://<member>:8384` or a `…,"url"` secret override.
+      `docs/diagnostics.md`. Members are registered `syncthing` endpoint names;
+      each endpoint's routes give the REST URL and its `apikey` secret
+      (`syncthing.<endpoint>.apikey`, set by `syncthing.create --apikey`) the key.
 - [ ] `configure` — native folder/device **provisioning** from orca (next slice;
       Syncthing ships no OpenAPI/GraphQL spec, so codegen has nothing to consume —
       a vendored spec would be authored here if/when this surface grows).
