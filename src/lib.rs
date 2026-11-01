@@ -88,13 +88,13 @@ impl ServiceBackend for SyncthingBackend {
 
     /// Liveness + version for one instance.
     ///
-    /// Probes `/rest/noauth/health`, which needs **no** API key — so an instance
-    /// whose key is not in the secret store still reports honest liveness rather
-    /// than erroring. When a key *is* configured the version is added as detail;
-    /// its absence degrades detail, never health.
+    /// Liveness probes `/rest/noauth/health` at the instance's
+    /// [`Routes::primary_url`]; that call carries no API key. The version call
+    /// is authenticated, so it goes only to the base resolved from the
+    /// registered `syncthing` endpoint row via [`api::resolve`] — the key never
+    /// travels to a service route. Without a resolvable endpoint the version is
+    /// skipped and the reason lands in `detail`; health is unaffected.
     ///
-    /// The URL comes from the instance's `routes` via [`Routes::primary_url`]
-    /// (orca has no scalar `base_url` — reachability is the ordered route set).
     /// An instance with no URL-addressable route is an unknown, not a false
     /// negative, so it is reported as an error rather than as "unhealthy".
     fn status<'a>(
@@ -112,34 +112,38 @@ impl ServiceBackend for SyncthingBackend {
                     instance
                 )));
             }
-
-            let client = Client::new();
-            let health: Health = api::get_json(&client, base, None, "/rest/noauth/health")
-                .map_err(ServiceError::Other)?;
-            let healthy = health.status.eq_ignore_ascii_case("ok");
-
-            // Version is best-effort detail: it needs the API key, and a missing
-            // key must not turn a live instance into an unhealthy one.
-            let detail = match api::api_key_opt(instance).and_then(|k| {
-                api::get_json::<Version>(
-                    &client,
-                    base,
-                    Some(k.expose_secret()),
-                    "/rest/system/version",
-                )
-                .ok()
-            }) {
-                Some(v) => format!("{} ({})", health.status, v.version),
-                None => format!("{} (version needs an API key)", health.status),
-            };
-
-            Ok(ServiceStatus {
-                healthy,
-                detail,
-                ..Default::default()
-            })
+            let target = api::resolve(instance).await;
+            probe(&Client::new(), base, target)
         })
     }
+}
+
+fn probe(
+    client: &Client,
+    health_base: &str,
+    target: Result<api::Target, String>,
+) -> Result<ServiceStatus, ServiceError> {
+    let health: Health = api::get_json(client, health_base, None, "/rest/noauth/health")
+        .map_err(ServiceError::Other)?;
+    let healthy = health.status.eq_ignore_ascii_case("ok");
+
+    let detail = match target.and_then(|t| {
+        api::get_json::<Version>(
+            client,
+            &t.base,
+            Some(t.key.expose_secret()),
+            "/rest/system/version",
+        )
+    }) {
+        Ok(v) => format!("{} ({})", health.status, v.version),
+        Err(e) => format!("{} (version skipped: {e})", health.status),
+    };
+
+    Ok(ServiceStatus {
+        healthy,
+        detail,
+        ..Default::default()
+    })
 }
 
 // ── Syncthing REST response shapes (only the fields `status` reads) ───────────
@@ -166,5 +170,76 @@ mod tests {
     fn declares_provider() {
         let b = SyncthingBackend::new("syncthing");
         assert_eq!(b.provider(), "syncthing");
+    }
+
+    fn capture(
+        seen: std::sync::Arc<std::sync::Mutex<Vec<plugin_toolkit::abi::HttpRequest>>>,
+        body: impl FnOnce() -> Result<ServiceStatus, ServiceError>,
+    ) -> Result<ServiceStatus, ServiceError> {
+        let sink = Box::new(move |_cap: &str, op: &str| {
+            let req: plugin_toolkit::abi::HttpRequest =
+                plugin_toolkit::serde_json::from_str(op).map_err(|e| e.to_string())?;
+            let reply = if req.url.ends_with("/rest/noauth/health") {
+                r#"{"status":"OK"}"#
+            } else {
+                r#"{"version":"v1.27.0"}"#
+            };
+            seen.lock().unwrap().push(req);
+            plugin_toolkit::serde_json::to_string(&plugin_toolkit::abi::HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: reply.as_bytes().to_vec(),
+            })
+            .map_err(|e| e.to_string())
+        });
+        plugin_toolkit::capsink::with_cap_sink(sink, body)
+    }
+
+    fn sends_key(req: &plugin_toolkit::abi::HttpRequest) -> bool {
+        req.headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-api-key"))
+    }
+
+    #[test]
+    fn key_goes_only_to_the_endpoint_base_never_the_service_route() {
+        let seen = std::sync::Arc::default();
+        let target = api::Target {
+            base: "http://endpoint.test:8384".into(),
+            key: plugin_toolkit::secrets::Secret::new("k".to_string()),
+        };
+        let st = capture(std::sync::Arc::clone(&seen), || {
+            probe(&Client::new(), "http://service.test:8384", Ok(target))
+        })
+        .unwrap();
+        assert_eq!(st.detail, "OK (v1.27.0)");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for req in seen.iter() {
+            if req.url.starts_with("http://service.test") {
+                assert!(!sends_key(req), "key sent to service route: {}", req.url);
+            } else {
+                assert_eq!(req.url, "http://endpoint.test:8384/rest/system/version");
+                assert!(sends_key(req));
+            }
+        }
+    }
+
+    #[test]
+    fn unresolved_endpoint_skips_the_authenticated_call() {
+        let seen = std::sync::Arc::default();
+        let st = capture(std::sync::Arc::clone(&seen), || {
+            probe(
+                &Client::new(),
+                "http://service.test:8384",
+                Err("no endpoint 'x'".into()),
+            )
+        })
+        .unwrap();
+        assert!(st.healthy);
+        assert_eq!(st.detail, "OK (version skipped: no endpoint 'x')");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(!sends_key(&seen[0]));
     }
 }

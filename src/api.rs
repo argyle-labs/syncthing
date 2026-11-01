@@ -51,16 +51,6 @@ pub fn api_key(endpoint: &str) -> Result<secrets::Secret<String>, String> {
         .map_err(|e| format!("syncthing endpoint '{endpoint}': {e}"))
 }
 
-/// `endpoint`'s API key if one is configured, else `None`.
-///
-/// Distinct from [`api_key`]: the unauthenticated health probe treats a missing
-/// key as "less detail available", not as a failure.
-pub fn api_key_opt(endpoint: &str) -> Option<secrets::Secret<String>> {
-    api_key(endpoint)
-        .ok()
-        .filter(|s| !s.expose_secret().trim().is_empty())
-}
-
 /// GET `{base}{path}`, decoding JSON into `T`. `key` is sent as `X-API-Key`
 /// when `Some`; Syncthing's `/rest/noauth/*` paths need no key.
 pub fn get_json<T: serde::de::DeserializeOwned>(
