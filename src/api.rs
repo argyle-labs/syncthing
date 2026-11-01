@@ -70,17 +70,88 @@ pub fn api_key(endpoint: &str) -> Result<secrets::Secret<String>, String> {
 /// Errors name `{endpoint}{path}`, never the route: tool errors reach
 /// `role = "any"` callers, and the host's transport error embeds the URL.
 fn scrub(err: impl std::fmt::Display, base: &str) -> String {
-    let authority = base.split_once("://").map_or(base, |(_, a)| a);
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(h, _)| h)
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let mut msg = err.to_string().replace(base, "").replace(authority, "");
-    if !host.is_empty() {
-        msg = msg.replace(host, "<route>");
+    let Some(host) = route_host(base) else {
+        return err.to_string();
+    };
+    let mut needles = vec![host.clone()];
+    if host.contains(':') {
+        needles.insert(0, format!("[{host}]"));
+    }
+    let mut msg = err.to_string();
+    for needle in &needles {
+        msg = replace_tokens(&msg, needle);
     }
     msg
+}
+
+/// The lowercased host of `base`, IPv6 without brackets.
+fn route_host(base: &str) -> Option<String> {
+    let rest = base.split_once("://").map_or(base, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split_once(']')?.0,
+        None => authority.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Replace each whole-token occurrence of `needle` (already lowercase) with
+/// `<route>`, absorbing a leading `scheme://`, a trailing `:port`, and, for a
+/// URL, its path.
+fn replace_tokens(msg: &str, needle: &str) -> String {
+    let lower = msg.to_ascii_lowercase();
+    let bytes = msg.as_bytes();
+    let is_host = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':');
+    let mut out = String::with_capacity(msg.len());
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(off) = lower[from..].find(needle) {
+        let at = from + off;
+        let mut end = at + needle.len();
+        from = end;
+        let before_ok = at == 0
+            || !is_host(bytes[at - 1])
+            || bytes[at - 1] == b':' && at >= 3 && &bytes[at - 3..at] == b"://";
+        let after_ok = end == bytes.len() || !is_host(bytes[end]) || bytes[end] == b':';
+        if !before_ok || !after_ok {
+            continue;
+        }
+        let mut start = at;
+        let is_url = at >= 3 && &bytes[at - 3..at] == b"://";
+        if is_url {
+            start = at - 3;
+            while start > 0 && bytes[start - 1].is_ascii_alphabetic() {
+                start -= 1;
+            }
+        }
+        if end < bytes.len() && bytes[end] == b':' {
+            let digits = bytes[end + 1..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
+            if digits > 0 {
+                end += 1 + digits;
+            }
+        }
+        if is_url {
+            end += bytes[end..]
+                .iter()
+                .take_while(|&&b| {
+                    !b.is_ascii_whitespace() && !matches!(b, b')' | b'"' | b'\'' | b'>' | b',')
+                })
+                .count();
+            while matches!(bytes[end - 1], b':' | b'.' | b';') {
+                end -= 1;
+            }
+        }
+        out.push_str(&msg[copied..start]);
+        out.push_str("<route>");
+        copied = end;
+        from = end;
+    }
+    out.push_str(&msg[copied..]);
+    out
 }
 
 /// GET `{base}{path}`, decoding JSON into `T`. `key` is sent as `X-API-Key`
@@ -183,6 +254,69 @@ mod tests {
             assert!(!err.contains("192.0.2.10"), "{err}");
             assert!(!err.contains("8384"), "{err}");
         }
+    }
+
+    #[test]
+    fn scrub_matches_host_case_insensitively() {
+        let msg = scrub(
+            "connect to HTTPS://NAS.Example.COM:8384/rest failed",
+            "https://nas.example.com:8384",
+        );
+        assert_eq!(msg, "connect to <route> failed");
+    }
+
+    #[test]
+    fn scrub_handles_elided_default_port() {
+        let msg = scrub(
+            "dns error for https://nas.lan:443/rest/db and nas.lan",
+            "https://nas.lan",
+        );
+        assert_eq!(msg, "dns error for <route> and <route>");
+    }
+
+    #[test]
+    fn scrub_handles_route_with_trailing_path() {
+        let msg = scrub(
+            "GET https://nas.lan/sync/rest/x: refused by nas.lan:443",
+            "https://nas.lan/sync",
+        );
+        assert_eq!(msg, "GET <route>: refused by <route>");
+    }
+
+    #[test]
+    fn scrub_handles_ipv6_with_port() {
+        let msg = scrub(
+            "url (https://[::1]:8384/rest): refused by [::1]:8384 at ::1",
+            "https://[::1]:8384",
+        );
+        assert_eq!(msg, "url (<route>): refused by <route> at <route>");
+    }
+
+    #[test]
+    fn scrub_handles_ipv6_without_port() {
+        let msg = scrub(
+            "tls handshake with [fe80::1] at 10:42: eof",
+            "https://[FE80::1]",
+        );
+        assert_eq!(msg, "tls handshake with <route> at 10:42: eof");
+    }
+
+    #[test]
+    fn scrub_leaves_words_containing_a_short_host() {
+        let msg = scrub(
+            "status: st: refused; first stage at st:8384",
+            "https://st:8384",
+        );
+        assert_eq!(msg, "status: <route>: refused; first stage at <route>");
+    }
+
+    #[test]
+    fn scrub_keeps_message_readable() {
+        let msg = scrub("error sending request for url (https://192.0.2.10:8384/rest/db/status): connection refused", "https://192.0.2.10:8384");
+        assert_eq!(
+            msg,
+            "error sending request for url (<route>): connection refused"
+        );
     }
 
     #[test]
