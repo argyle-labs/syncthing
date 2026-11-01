@@ -464,8 +464,8 @@ mod tests {
     #[test]
     fn folders_health_takes_an_endpoint_name() {
         let a: FoldersHealthArgs =
-            plugin_toolkit::serde_json::from_str(r#"{"name":"willow"}"#).unwrap();
-        assert_eq!(a.name, "willow");
+            plugin_toolkit::serde_json::from_str(r#"{"name":"node-a"}"#).unwrap();
+        assert_eq!(a.name, "node-a");
         assert_eq!(a.scan_stall_secs, 3600);
     }
 

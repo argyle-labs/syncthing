@@ -117,26 +117,26 @@ mod tests {
 
     #[test]
     fn apikey_is_keyed_to_the_endpoint_not_its_address() {
-        let name = secrets::scoped_name(PROVIDER, "willow", "apikey").unwrap();
-        assert_eq!(name.as_str(), "syncthing.willow.apikey");
+        let name = secrets::scoped_name(PROVIDER, "node-a", "apikey").unwrap();
+        assert_eq!(name.as_str(), "syncthing.node-a.apikey");
         assert!(plugin_toolkit::runtime::validate_endpoint_name("192.0.2.10").is_err());
     }
 
     #[test]
     fn https_route_passes() {
-        assert!(require_tls("willow", "https://192.0.2.10:8384", false).is_ok());
+        assert!(require_tls("node-a", "https://192.0.2.10:8384", false).is_ok());
     }
 
     #[test]
     fn http_route_without_opt_in_refuses() {
-        let err = require_tls("willow", "http://192.0.2.10:8384", false).unwrap_err();
-        assert!(err.contains("'willow'"));
+        let err = require_tls("node-a", "http://192.0.2.10:8384", false).unwrap_err();
+        assert!(err.contains("'node-a'"));
         assert!(err.contains("gui.tls=true"));
         assert!(err.contains("allow_plaintext"));
     }
 
     #[test]
     fn http_route_with_opt_in_passes() {
-        assert!(require_tls("willow", "http://192.0.2.10:8384", true).is_ok());
+        assert!(require_tls("node-a", "http://192.0.2.10:8384", true).is_ok());
     }
 }

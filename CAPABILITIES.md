@@ -19,7 +19,7 @@ status of a syncthing instance) and a `replication` **ReplicationStatusProvider*
       a vendored spec would be authored here if/when this surface grows).
 
 Wired to failover: attach a `storage.replication` relationship (provider
-`syncthing`, folder id, willow/maple routes) to a share; the gate then holds any
+`syncthing`, folder id, node-a/node-b routes) to a share; the gate then holds any
 route swap until this provider confirms the folder is in sync across members.
 
 ## Transport security
