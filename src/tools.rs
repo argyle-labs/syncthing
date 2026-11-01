@@ -22,6 +22,8 @@ pub struct SyncthingEndpoint {
     #[secret]
     pub apikey: String,
     pub insecure: bool,
+    /// Permit sending the API key over plain `http` routes.
+    pub allow_plaintext: bool,
     pub enabled: bool,
 }
 

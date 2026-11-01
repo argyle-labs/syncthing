@@ -38,10 +38,26 @@ pub async fn resolve(endpoint: &str) -> Result<Target, String> {
     let base = route::resolve_reachable(endpoint, &row.routes, row.insecure)
         .await
         .map_err(|e| format!("syncthing endpoint '{endpoint}': {e}"))?;
-    Ok(Target {
-        base: base.trim_end_matches('/').to_string(),
-        key,
-    })
+    let base = base.trim_end_matches('/').to_string();
+    require_tls(endpoint, &base, row.allow_plaintext)?;
+    Ok(Target { base, key })
+}
+
+/// The API key grants full control of the node, so it is only sent over
+/// `https` unless the endpoint opts in with `allow_plaintext`.
+pub fn require_tls(endpoint: &str, base: &str, allow_plaintext: bool) -> Result<(), String> {
+    if allow_plaintext
+        || base
+            .get(..8)
+            .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "syncthing endpoint '{endpoint}': refusing to send the API key over non-https route \
+         {base}; enable Syncthing GUI TLS (gui.tls=true) and set insecure=true for its \
+         self-signed cert, or set allow_plaintext=true on the endpoint"
+    ))
 }
 
 /// `endpoint`'s API key. A missing key is a configuration gap, surfaced as an
@@ -104,5 +120,23 @@ mod tests {
         let name = secrets::scoped_name(PROVIDER, "willow", "apikey").unwrap();
         assert_eq!(name.as_str(), "syncthing.willow.apikey");
         assert!(plugin_toolkit::runtime::validate_endpoint_name("192.0.2.10").is_err());
+    }
+
+    #[test]
+    fn https_route_passes() {
+        assert!(require_tls("willow", "https://192.0.2.10:8384", false).is_ok());
+    }
+
+    #[test]
+    fn http_route_without_opt_in_refuses() {
+        let err = require_tls("willow", "http://192.0.2.10:8384", false).unwrap_err();
+        assert!(err.contains("'willow'"));
+        assert!(err.contains("gui.tls=true"));
+        assert!(err.contains("allow_plaintext"));
+    }
+
+    #[test]
+    fn http_route_with_opt_in_passes() {
+        assert!(require_tls("willow", "http://192.0.2.10:8384", true).is_ok());
     }
 }

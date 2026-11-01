@@ -22,6 +22,15 @@ Wired to failover: attach a `storage.replication` relationship (provider
 `syncthing`, folder id, willow/maple routes) to a share; the gate then holds any
 route swap until this provider confirms the folder is in sync across members.
 
+## Transport security
+
+The endpoint's API key grants full control of the Syncthing node, so it is
+only sent over `https` routes. A keyed call against an `http` route is refused
+before any request carrying the key is made, with an error naming the endpoint.
+To fix: enable Syncthing GUI TLS (`gui.tls=true`) and set `insecure` on the
+endpoint for its self-signed cert, or opt in to plaintext with
+`allow_plaintext` (default `false`).
+
 ## Per-plugin code (the only work this repo owns)
 - [x] `provider` / `runtimes` / `default_port` / `capabilities` / `data_paths` — declarative descriptor
 - [ ] `workload_spec(runtime)` — *what* to run; `deploy_target` renders it to a container / LXC / VM

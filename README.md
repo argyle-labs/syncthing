@@ -83,6 +83,15 @@ orca service.backup syncthing      # location-agnostic backup (tar; PBS on Proxm
 orca service.configure syncthing   # apply config via the upstream API
 ```
 
+## Transport security
+
+The endpoint's API key grants full control of the Syncthing node, so it is
+only sent over `https` routes. A keyed call against an `http` route is refused
+before any request carrying the key is made, with an error naming the endpoint.
+To fix: enable Syncthing GUI TLS (`gui.tls=true`) and set `insecure` on the
+endpoint for its self-signed cert, or opt in to plaintext with
+`allow_plaintext` (default `false`).
+
 ## Layout
 
 - `src/` — the plugin (pure Rust): the `ServiceBackend` descriptor + `configure` / `status`.
