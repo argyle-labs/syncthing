@@ -113,6 +113,6 @@ mod tests {
     fn apikey_is_keyed_to_the_endpoint_not_its_address() {
         let name = secrets::scoped_name(PROVIDER, "willow", "apikey").unwrap();
         assert_eq!(name.as_str(), "syncthing.willow.apikey");
-        assert!(plugin_toolkit::runtime::validate_endpoint_name("10.10.10.10").is_err());
+        assert!(plugin_toolkit::runtime::validate_endpoint_name("192.0.2.10").is_err());
     }
 }
